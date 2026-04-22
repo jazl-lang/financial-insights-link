@@ -71,63 +71,24 @@ function bytesFromBase64(b64: string): Uint8Array {
   return out;
 }
 
-// OCR fallback: pass the entire PDF directly to Gemini as a file attachment.
-// Gemini natively reads PDFs (including scanned ones via its vision pipeline),
-// avoiding the need to render pages ourselves in the edge runtime.
-async function ocrWithGeminiPdf(pdfB64: string, apiKey: string): Promise<string> {
-  const resp = await fetch(AI_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: VISION_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "This is a scanned annual report. Transcribe ALL text on every page in order. Preserve table structure using pipes (|) between columns. At the start of each page output a marker line exactly: '===== PAGE N =====' where N is the page number. Output only the transcription, no commentary.",
-            },
-            { type: "image_url", image_url: { url: `data:application/pdf;base64,${pdfB64}` } },
-          ],
-        },
-      ],
-    }),
-  });
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`Vision OCR failed ${resp.status}: ${t}`);
-  }
-  const data = await resp.json();
-  return data.choices?.[0]?.message?.content ?? "";
-}
-
-async function extractTextFromPdf(pdfBytes: Uint8Array): Promise<{ text: string; pages: string[]; weak: boolean; totalPages: number }> {
-  const pdf = await getDocumentProxy(pdfBytes);
-  const totalPages = pdf.numPages;
-  const { text } = await extractText(pdf, { mergePages: false });
-  const pages = Array.isArray(text) ? text as string[] : [String(text)];
-  const joined = pages.map((t, i) => `\n\n===== PAGE ${i + 1} =====\n${t}`).join("\n");
-  // "weak" if average chars per page is very low — likely scanned
-  const avg = joined.length / Math.max(1, totalPages);
-  const weak = avg < 200;
-  return { text: joined, pages, weak, totalPages };
-}
-
-async function callAiForStructured(text: string, apiKey: string) {
-  // Truncate very long text to keep tokens reasonable
-  const MAX_CHARS = 180_000;
-  const trimmed = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) + "\n[...truncated...]" : text;
-
+// Send the PDF directly to Gemini and ask it to return structured P&L data
+// via a tool call. Gemini reads PDFs natively (text + scans).
+async function extractFromPdfWithGemini(pdfB64: string, apiKey: string) {
   const body = {
-    model: TEXT_MODEL,
+    model: EXTRACT_MODEL,
     messages: [
       {
         role: "system",
         content:
-          "You are a financial-document extraction engine. Given the raw text of an annual report or financial statements, locate the consolidated Profit & Loss / Income Statement and the explanatory notes that break down each P&L line item. Be precise: copy line-item names verbatim, preserve negative signs for expenses if printed with parentheses, and capture page numbers from the '===== PAGE N =====' markers. Match notes to P&L lines: prefer explicit numeric note refs printed beside the P&L row; otherwise match by note title; otherwise infer semantically and flag with lower confidence. If you cannot find a P&L statement, return empty arrays.",
+          "You are a financial-document extraction engine. You will be given a PDF of an annual report / audited financial statements. Your job: (1) locate the consolidated Profit & Loss / Income Statement (also called 'Statement of Profit or Loss', 'Statement of Comprehensive Income', or 'Income Statement'); (2) extract EVERY row exactly as printed, in order, including subtotals like 'Gross profit', 'Operating profit', 'Profit for the year' — copy line-item text verbatim; (3) capture both the latest period and the comparative prior period as numbers (parentheses = negative); (4) record the page number each row appears on; (5) then locate the explanatory notes that break down each P&L line and return their components. Match notes to P&L lines: prefer the explicit numeric note ref printed next to the P&L row; otherwise match by note title; otherwise infer semantically and flag with lower confidence. NEVER return empty arrays unless the document truly has no income statement — if you can see revenue/expense rows, you MUST return them.",
       },
-      { role: "user", content: trimmed },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Extract the P&L statement and supporting notes from this PDF. Return via the return_extraction tool." },
+          { type: "image_url", image_url: { url: `data:application/pdf;base64,${pdfB64}` } },
+        ],
+      },
     ],
     tools: [
       {
