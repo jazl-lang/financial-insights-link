@@ -1,13 +1,10 @@
-// Real PDF extraction with OCR fallback + AI-assisted P&L/notes parsing.
+// Real PDF extraction with AI-native PDF reading (handles scans via Gemini vision).
 // Pipeline:
-//   1. Decode base64 PDF
-//   2. Try text extraction with unpdf (pdf.js under the hood)
-//   3. If text density is too low (likely scanned), render pages to images
-//      and run OCR via Gemini vision
-//   4. Send the extracted text to Gemini with a strict tool schema and return
-//      structured ExtractionResult JSON.
-
-import { extractText, getDocumentProxy } from "https://esm.sh/unpdf@0.12.1";
+//   1. Receive base64 PDF from client.
+//   2. Send the PDF directly to Gemini as a file attachment together with a
+//      strict tool schema. Gemini natively reads both text-based and scanned
+//      PDFs, so we don't need a separate text-extraction + OCR pass.
+//   3. Return the structured ExtractionResult JSON.
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
