@@ -1,13 +1,10 @@
-// Real PDF extraction with OCR fallback + AI-assisted P&L/notes parsing.
+// Real PDF extraction with AI-native PDF reading (handles scans via Gemini vision).
 // Pipeline:
-//   1. Decode base64 PDF
-//   2. Try text extraction with unpdf (pdf.js under the hood)
-//   3. If text density is too low (likely scanned), render pages to images
-//      and run OCR via Gemini vision
-//   4. Send the extracted text to Gemini with a strict tool schema and return
-//      structured ExtractionResult JSON.
-
-import { extractText, getDocumentProxy } from "https://esm.sh/unpdf@0.12.1";
+//   1. Receive base64 PDF from client.
+//   2. Send the PDF directly to Gemini as a file attachment together with a
+//      strict tool schema. Gemini natively reads both text-based and scanned
+//      PDFs, so we don't need a separate text-extraction + OCR pass.
+//   3. Return the structured ExtractionResult JSON.
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -16,8 +13,8 @@ const corsHeaders = {
 };
 
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
-const TEXT_MODEL = "google/gemini-2.5-flash";
-const VISION_MODEL = "google/gemini-2.5-flash";
+// Use Pro for extraction — better at reading messy financial tables (text + scanned).
+const EXTRACT_MODEL = "google/gemini-2.5-pro";
 
 const EXTRACT_SCHEMA = {
   type: "object",
@@ -74,63 +71,24 @@ function bytesFromBase64(b64: string): Uint8Array {
   return out;
 }
 
-// OCR fallback: pass the entire PDF directly to Gemini as a file attachment.
-// Gemini natively reads PDFs (including scanned ones via its vision pipeline),
-// avoiding the need to render pages ourselves in the edge runtime.
-async function ocrWithGeminiPdf(pdfB64: string, apiKey: string): Promise<string> {
-  const resp = await fetch(AI_URL, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: VISION_MODEL,
-      messages: [
-        {
-          role: "user",
-          content: [
-            {
-              type: "text",
-              text: "This is a scanned annual report. Transcribe ALL text on every page in order. Preserve table structure using pipes (|) between columns. At the start of each page output a marker line exactly: '===== PAGE N =====' where N is the page number. Output only the transcription, no commentary.",
-            },
-            { type: "image_url", image_url: { url: `data:application/pdf;base64,${pdfB64}` } },
-          ],
-        },
-      ],
-    }),
-  });
-  if (!resp.ok) {
-    const t = await resp.text();
-    throw new Error(`Vision OCR failed ${resp.status}: ${t}`);
-  }
-  const data = await resp.json();
-  return data.choices?.[0]?.message?.content ?? "";
-}
-
-async function extractTextFromPdf(pdfBytes: Uint8Array): Promise<{ text: string; pages: string[]; weak: boolean; totalPages: number }> {
-  const pdf = await getDocumentProxy(pdfBytes);
-  const totalPages = pdf.numPages;
-  const { text } = await extractText(pdf, { mergePages: false });
-  const pages = Array.isArray(text) ? text as string[] : [String(text)];
-  const joined = pages.map((t, i) => `\n\n===== PAGE ${i + 1} =====\n${t}`).join("\n");
-  // "weak" if average chars per page is very low — likely scanned
-  const avg = joined.length / Math.max(1, totalPages);
-  const weak = avg < 200;
-  return { text: joined, pages, weak, totalPages };
-}
-
-async function callAiForStructured(text: string, apiKey: string) {
-  // Truncate very long text to keep tokens reasonable
-  const MAX_CHARS = 180_000;
-  const trimmed = text.length > MAX_CHARS ? text.slice(0, MAX_CHARS) + "\n[...truncated...]" : text;
-
+// Send the PDF directly to Gemini and ask it to return structured P&L data
+// via a tool call. Gemini reads PDFs natively (text + scans).
+async function extractFromPdfWithGemini(pdfB64: string, apiKey: string) {
   const body = {
-    model: TEXT_MODEL,
+    model: EXTRACT_MODEL,
     messages: [
       {
         role: "system",
         content:
-          "You are a financial-document extraction engine. Given the raw text of an annual report or financial statements, locate the consolidated Profit & Loss / Income Statement and the explanatory notes that break down each P&L line item. Be precise: copy line-item names verbatim, preserve negative signs for expenses if printed with parentheses, and capture page numbers from the '===== PAGE N =====' markers. Match notes to P&L lines: prefer explicit numeric note refs printed beside the P&L row; otherwise match by note title; otherwise infer semantically and flag with lower confidence. If you cannot find a P&L statement, return empty arrays.",
+          "You are a financial-document extraction engine. You will be given a PDF of an annual report / audited financial statements. Your job: (1) locate the consolidated Profit & Loss / Income Statement (also called 'Statement of Profit or Loss', 'Statement of Comprehensive Income', or 'Income Statement'); (2) extract EVERY row exactly as printed, in order, including subtotals like 'Gross profit', 'Operating profit', 'Profit for the year' — copy line-item text verbatim; (3) capture both the latest period and the comparative prior period as numbers (parentheses = negative); (4) record the page number each row appears on; (5) then locate the explanatory notes that break down each P&L line and return their components. Match notes to P&L lines: prefer the explicit numeric note ref printed next to the P&L row; otherwise match by note title; otherwise infer semantically and flag with lower confidence. NEVER return empty arrays unless the document truly has no income statement — if you can see revenue/expense rows, you MUST return them.",
       },
-      { role: "user", content: trimmed },
+      {
+        role: "user",
+        content: [
+          { type: "text", text: "Extract the P&L statement and supporting notes from this PDF. Return via the return_extraction tool." },
+          { type: "image_url", image_url: { url: `data:application/pdf;base64,${pdfB64}` } },
+        ],
+      },
     ],
     tools: [
       {
@@ -170,31 +128,17 @@ Deno.serve(async (req) => {
     const { fileName, base64 } = await req.json();
     if (!base64) throw new Error("Missing 'base64' in request body");
 
-    const pdfBytes = bytesFromBase64(base64);
-    let { text, weak, totalPages } = await extractTextFromPdf(pdfBytes);
-    let usedOcr = false;
+    // Sanity-check that the base64 decodes to a real PDF (starts with %PDF)
+    try {
+      const head = bytesFromBase64(base64.slice(0, 32));
+      const sig = String.fromCharCode(...head.slice(0, 4));
+      if (sig !== "%PDF") console.warn("Payload does not start with %PDF — got:", sig);
+    } catch { /* ignore */ }
 
-    if (weak) {
-      console.log(`Weak text (${text.length} chars / ${totalPages} pages) — falling back to OCR`);
-      try {
-        const ocrText = await ocrWithGeminiPdf(base64, apiKey);
-        if (ocrText && ocrText.length > text.length) {
-          text = ocrText;
-          usedOcr = true;
-        }
-      } catch (e) {
-        console.warn("OCR fallback failed:", e);
-      }
-    }
-
-    if (!text || text.trim().length < 50) {
-      throw new Error("Could not extract any usable text from the PDF");
-    }
-
-    const extracted = await callAiForStructured(text, apiKey);
+    const extracted = await extractFromPdfWithGemini(base64, apiKey);
 
     return new Response(
-      JSON.stringify({ ...extracted, fileName, totalPages, usedOcr }),
+      JSON.stringify({ ...extracted, fileName }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
