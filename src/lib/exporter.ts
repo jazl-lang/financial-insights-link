@@ -65,7 +65,8 @@ export function exportToXlsx(results: ExtractionResult[]) {
 
   successful.forEach((r, idx) => {
     const ws = buildEntitySheet(r);
-    const name = uniqueSheetName(r.company || r.fileName || `Entity ${idx + 1}`, usedNames);
+    const rawName = buildSheetName(r) || `Entity ${idx + 1}`;
+    const name = uniqueSheetName(rawName, usedNames);
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
@@ -78,6 +79,21 @@ function sanitizeSheetName(name: string) {
     .replace(/[:\\/?*[\]]/g, " ")
     .trim()
     .slice(0, 31) || "Sheet";
+}
+
+// Extract a 4-digit year from the period string, if present.
+function extractYear(period: string | undefined | null): string {
+  if (!period) return "";
+  const m = period.match(/(19|20)\d{2}/);
+  return m ? m[0] : "";
+}
+
+// Sheet name = "Entity - Year" (or just entity if year unknown).
+function buildSheetName(r: ExtractionResult): string {
+  const entity = (r.company || r.fileName || "").trim();
+  const year = extractYear(r.period);
+  if (entity && year) return `${entity} - ${year}`;
+  return entity;
 }
 
 function uniqueSheetName(raw: string, used: Set<string>) {
