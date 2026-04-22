@@ -128,31 +128,17 @@ Deno.serve(async (req) => {
     const { fileName, base64 } = await req.json();
     if (!base64) throw new Error("Missing 'base64' in request body");
 
-    const pdfBytes = bytesFromBase64(base64);
-    let { text, weak, totalPages } = await extractTextFromPdf(pdfBytes);
-    let usedOcr = false;
+    // Sanity-check that the base64 decodes to a real PDF (starts with %PDF)
+    try {
+      const head = bytesFromBase64(base64.slice(0, 32));
+      const sig = String.fromCharCode(...head.slice(0, 4));
+      if (sig !== "%PDF") console.warn("Payload does not start with %PDF — got:", sig);
+    } catch { /* ignore */ }
 
-    if (weak) {
-      console.log(`Weak text (${text.length} chars / ${totalPages} pages) — falling back to OCR`);
-      try {
-        const ocrText = await ocrWithGeminiPdf(base64, apiKey);
-        if (ocrText && ocrText.length > text.length) {
-          text = ocrText;
-          usedOcr = true;
-        }
-      } catch (e) {
-        console.warn("OCR fallback failed:", e);
-      }
-    }
-
-    if (!text || text.trim().length < 50) {
-      throw new Error("Could not extract any usable text from the PDF");
-    }
-
-    const extracted = await callAiForStructured(text, apiKey);
+    const extracted = await extractFromPdfWithGemini(base64, apiKey);
 
     return new Response(
-      JSON.stringify({ ...extracted, fileName, totalPages, usedOcr }),
+      JSON.stringify({ ...extracted, fileName }),
       { headers: { ...corsHeaders, "Content-Type": "application/json" } },
     );
   } catch (e) {
