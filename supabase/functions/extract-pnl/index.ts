@@ -110,7 +110,10 @@ async function extractFromPdfWithGemini(pdfB64: string, apiKey: string) {
   });
   if (!resp.ok) {
     const t = await resp.text();
-    throw new Error(`AI gateway error ${resp.status}: ${t}`);
+    console.error("AI gateway error", resp.status, t);
+    if (resp.status === 429) throw new Error("RATE_LIMIT");
+    if (resp.status === 402) throw new Error("PAYMENT_REQUIRED");
+    throw new Error("EXTRACTION_FAILED");
   }
   const data = await resp.json();
   const call = data.choices?.[0]?.message?.tool_calls?.[0];
@@ -125,15 +128,45 @@ Deno.serve(async (req) => {
     const apiKey = Deno.env.get("LOVABLE_API_KEY");
     if (!apiKey) throw new Error("LOVABLE_API_KEY is not configured");
 
-    const { fileName, base64 } = await req.json();
-    if (!base64) throw new Error("Missing 'base64' in request body");
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== "object") {
+      return new Response(JSON.stringify({ error: "Invalid request body" }), {
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    const { fileName, base64 } = body as { fileName?: unknown; base64?: unknown };
 
-    // Sanity-check that the base64 decodes to a real PDF (starts with %PDF)
+    if (typeof base64 !== "string" || base64.length === 0) {
+      return new Response(JSON.stringify({ error: "Missing or invalid 'base64' field" }), {
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    // ~15 MB decoded ≈ 20M base64 chars
+    if (base64.length > 20_000_000) {
+      return new Response(JSON.stringify({ error: "File too large (max ~15 MB)" }), {
+        status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+    if (fileName !== undefined && (typeof fileName !== "string" || fileName.length > 255)) {
+      return new Response(JSON.stringify({ error: "Invalid 'fileName' field" }), {
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
+
+    // Hard-reject anything that isn't a real PDF
     try {
       const head = bytesFromBase64(base64.slice(0, 32));
       const sig = String.fromCharCode(...head.slice(0, 4));
-      if (sig !== "%PDF") console.warn("Payload does not start with %PDF — got:", sig);
-    } catch { /* ignore */ }
+      if (sig !== "%PDF") {
+        return new Response(JSON.stringify({ error: "Only PDF files are accepted" }), {
+          status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+        });
+      }
+    } catch {
+      return new Response(JSON.stringify({ error: "Invalid base64 payload" }), {
+        status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
+      });
+    }
 
     const extracted = await extractFromPdfWithGemini(base64, apiKey);
 
@@ -143,9 +176,17 @@ Deno.serve(async (req) => {
     );
   } catch (e) {
     console.error("extract-pnl error:", e);
-    const msg = e instanceof Error ? e.message : "Unknown error";
-    const status = msg.includes("429") ? 429 : msg.includes("402") ? 402 : 500;
-    return new Response(JSON.stringify({ error: msg }), {
+    const code = e instanceof Error ? e.message : "";
+    let status = 500;
+    let userMsg = "Extraction failed. Please try again.";
+    if (code === "RATE_LIMIT") {
+      status = 429;
+      userMsg = "Rate limit reached. Please wait and retry.";
+    } else if (code === "PAYMENT_REQUIRED") {
+      status = 402;
+      userMsg = "Service temporarily unavailable.";
+    }
+    return new Response(JSON.stringify({ error: userMsg }), {
       status,
       headers: { ...corsHeaders, "Content-Type": "application/json" },
     });
