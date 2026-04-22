@@ -65,7 +65,8 @@ export function exportToXlsx(results: ExtractionResult[]) {
 
   successful.forEach((r, idx) => {
     const ws = buildEntitySheet(r);
-    const name = uniqueSheetName(r.company || r.fileName || `Entity ${idx + 1}`, usedNames);
+    const rawName = buildSheetName(r) || `Entity ${idx + 1}`;
+    const name = uniqueSheetName(rawName, usedNames);
     XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
@@ -78,6 +79,21 @@ function sanitizeSheetName(name: string) {
     .replace(/[:\\/?*[\]]/g, " ")
     .trim()
     .slice(0, 31) || "Sheet";
+}
+
+// Extract a 4-digit year from the period string, if present.
+function extractYear(period: string | undefined | null): string {
+  if (!period) return "";
+  const m = period.match(/(19|20)\d{2}/);
+  return m ? m[0] : "";
+}
+
+// Sheet name = "Entity - Year" (or just entity if year unknown).
+function buildSheetName(r: ExtractionResult): string {
+  const entity = (r.company || r.fileName || "").trim();
+  const year = extractYear(r.period);
+  if (entity && year) return `${entity} - ${year}`;
+  return entity;
 }
 
 function uniqueSheetName(raw: string, used: Set<string>) {
@@ -105,26 +121,25 @@ function uniqueSheetName(raw: string, used: Set<string>) {
  */
 function buildEntitySheet(r: ExtractionResult) {
   const rows: Row[] = [];
-  const styleMap: Record<number, "company" | "title" | "meta" | "header" | "subtotal" | "note" | "line" | "blank"> = {};
+  const styleMap: Record<number, "company" | "title" | "period" | "currency" | "header" | "subtotal" | "note" | "line" | "blank" | "source"> = {};
 
+  // Centered company name
   rows.push([r.company || r.fileName, "", "", "", ""]);
   styleMap[rows.length - 1] = "company";
 
-  rows.push([r.statementTitle || "Statement of Profit or Loss", "", "", "", ""]);
+  // Centered statement title
+  rows.push([r.statementTitle || "Statement of Comprehensive Income", "", "", "", ""]);
   styleMap[rows.length - 1] = "title";
 
-  rows.push([
-    `Period: ${r.period || "—"}`,
-    "",
-    `Currency: ${r.currency || "—"}`,
-    "",
-    `Source: ${r.fileName}`,
-  ]);
-  styleMap[rows.length - 1] = "meta";
+  // Centered period
+  rows.push([`Period: ${r.period || "—"}`, "", "", "", ""]);
+  styleMap[rows.length - 1] = "period";
 
-  rows.push(["", "", "", "", ""]);
-  styleMap[rows.length - 1] = "blank";
+  // Currency right-aligned above the table
+  rows.push(["", "", "", `Currency: ${r.currency || "—"}`, ""]);
+  styleMap[rows.length - 1] = "currency";
 
+  // Table header
   rows.push(["Line Item", "Note", "Current Year", "Prior Year", "Page"]);
   styleMap[rows.length - 1] = "header";
 
@@ -151,7 +166,7 @@ function buildEntitySheet(r: ExtractionResult) {
       const childNotes = notesByParent.get(p.id) ?? [];
       childNotes.forEach((n) => {
         rows.push([
-          `    ${n.component}${n.noteTitle ? `  (${n.noteTitle})` : ""}`,
+          `   ${n.component}${n.noteTitle ? ` (${n.noteTitle})` : ""}`,
           "",
           n.currentYear,
           n.priorYear,
@@ -162,31 +177,47 @@ function buildEntitySheet(r: ExtractionResult) {
     }
   });
 
+  // Source footer
+  rows.push([`Source: ${r.fileName}`, "", "", "", ""]);
+  styleMap[rows.length - 1] = "source";
+
   const ws = XLSX.utils.aoa_to_sheet(rows);
 
   ws["!cols"] = [
-    { wch: 60 },
+    { wch: 55 },
     { wch: 8 },
     { wch: 18 },
     { wch: 18 },
     { wch: 8 },
   ];
 
-  // Merge company / title across all 5 columns
+  // Merge centered header rows + source footer across all 5 columns
   ws["!merges"] = ws["!merges"] || [];
   rows.forEach((_, rIdx) => {
     const kind = styleMap[rIdx];
-    if (kind === "company" || kind === "title") {
+    if (kind === "company" || kind === "title" || kind === "period" || kind === "source") {
       ws["!merges"]!.push({ s: { r: rIdx, c: 0 }, e: { r: rIdx, c: 4 } });
     }
   });
 
-  // Freeze header rows + label column
+  // Freeze header rows + label column (5 header rows now)
   (ws as { [k: string]: unknown })["!views"] = [
     { state: "frozen", xSplit: 1, ySplit: 5 },
   ];
 
   const numFmt = '#,##0;(#,##0);"-"';
+  const headerBorder = {
+    top: { style: "thin", color: { rgb: "1F3A5F" } },
+    bottom: { style: "thin", color: { rgb: "1F3A5F" } },
+    left: { style: "thin", color: { rgb: "1F3A5F" } },
+    right: { style: "thin", color: { rgb: "1F3A5F" } },
+  };
+  const cellBorder = {
+    top: { style: "thin", color: { rgb: "BFBFBF" } },
+    bottom: { style: "thin", color: { rgb: "BFBFBF" } },
+    left: { style: "thin", color: { rgb: "BFBFBF" } },
+    right: { style: "thin", color: { rgb: "BFBFBF" } },
+  };
   rows.forEach((_, rIdx) => {
     const kind = styleMap[rIdx];
     for (let c = 0; c < 5; c++) {
@@ -198,37 +229,43 @@ function buildEntitySheet(r: ExtractionResult) {
       }
       if (kind === "company") {
         cell.s = {
-          font: { bold: true, sz: 14, color: { rgb: "FFFFFF" } },
-          fill: { fgColor: { rgb: "1F3A5F" } },
-          alignment: { horizontal: "left" },
+          font: { bold: true, sz: 13, color: { rgb: "000000" } },
+          alignment: { horizontal: "center" },
         };
       } else if (kind === "title") {
-        cell.s = { font: { bold: true, sz: 12, italic: true } };
-      } else if (kind === "meta") {
-        cell.s = { font: { sz: 10, color: { rgb: "555555" } } };
+        cell.s = { font: { bold: true, sz: 12 }, alignment: { horizontal: "center" } };
+      } else if (kind === "period") {
+        cell.s = { font: { bold: true, sz: 11 }, alignment: { horizontal: "center" } };
+      } else if (kind === "currency") {
+        cell.s = { font: { bold: true, sz: 10 }, alignment: { horizontal: "right" } };
       } else if (kind === "header") {
         cell.s = {
           font: { bold: true, color: { rgb: "FFFFFF" } },
-          fill: { fgColor: { rgb: "4A6FA5" } },
-          alignment: { horizontal: c >= 2 ? "right" : "left" },
+          fill: { fgColor: { rgb: "1F3A5F" } },
+          alignment: { horizontal: "center" },
+          border: headerBorder,
         };
       } else if (kind === "subtotal") {
         cell.s = {
           font: { bold: true },
           fill: { fgColor: { rgb: "EAF0F8" } },
-          border: {
-            top: { style: "thin", color: { rgb: "888888" } },
-            bottom: { style: "thin", color: { rgb: "888888" } },
-          },
+          border: cellBorder,
           alignment: { horizontal: c >= 2 ? "right" : "left" },
         };
       } else if (kind === "note") {
         cell.s = {
-          font: { italic: true, sz: 10, color: { rgb: "333333" } },
-          alignment: { horizontal: c >= 2 ? "right" : "left", indent: c === 0 ? 1 : 0 },
+          font: { sz: 10, color: { rgb: "333333" } },
+          alignment: { horizontal: c >= 2 ? "right" : "left", indent: c === 0 ? 2 : 0 },
+          border: cellBorder,
         };
       } else if (kind === "line") {
-        cell.s = { alignment: { horizontal: c >= 2 ? "right" : "left" } };
+        cell.s = {
+          font: { bold: c === 0 },
+          alignment: { horizontal: c >= 2 ? "right" : "left" },
+          border: cellBorder,
+        };
+      } else if (kind === "source") {
+        cell.s = { font: { sz: 10, color: { rgb: "555555" } }, alignment: { horizontal: "left" } };
       }
     }
   });
