@@ -11,7 +11,7 @@ import {
   type ExtractionResult,
 } from "@/lib/mockExtractor";
 
-const MAX_FILES = 20;
+const MAX_FILES = 30;
 
 const Index = () => {
   const [items, setItems] = useState<ExtractionResult[]>([]);
