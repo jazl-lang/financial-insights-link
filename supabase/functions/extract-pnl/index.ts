@@ -13,8 +13,8 @@ const corsHeaders = {
 };
 
 const AI_URL = "https://ai.gateway.lovable.dev/v1/chat/completions";
-const TEXT_MODEL = "google/gemini-2.5-flash";
-const VISION_MODEL = "google/gemini-2.5-flash";
+// Use Pro for extraction — better at reading messy financial tables (text + scanned).
+const EXTRACT_MODEL = "google/gemini-2.5-pro";
 
 const EXTRACT_SCHEMA = {
   type: "object",
