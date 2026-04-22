@@ -1,1 +1,4 @@
 project_id = "weqtppshyigvxnuzilcc"
+
+[functions.extract-pnl]
+verify_jwt = false
