@@ -74,16 +74,6 @@ function bytesFromBase64(b64: string): Uint8Array {
   return out;
 }
 
-async function uint8ToBase64(u8: Uint8Array): Promise<string> {
-  // chunk to avoid call stack issues
-  let binary = "";
-  const CHUNK = 0x8000;
-  for (let i = 0; i < u8.length; i += CHUNK) {
-    binary += String.fromCharCode(...u8.subarray(i, i + CHUNK));
-  }
-  return btoa(binary);
-}
-
 // OCR fallback: pass the entire PDF directly to Gemini as a file attachment.
 // Gemini natively reads PDFs (including scanned ones via its vision pipeline),
 // avoiding the need to render pages ourselves in the edge runtime.
