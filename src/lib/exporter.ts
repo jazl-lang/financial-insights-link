@@ -55,200 +55,164 @@ export function exportToXlsx(results: ExtractionResult[]) {
   if (!successful.length) {
     // Fall back to empty workbook
     const wb = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["No data"]]), "P&L Comparison");
-    XLSX.writeFile(wb, `pnl_comparison_${new Date().toISOString().slice(0, 10)}.xlsx`);
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet([["No data"]]), "P&L");
+    XLSX.writeFile(wb, `pnl_extract_${new Date().toISOString().slice(0, 10)}.xlsx`);
     return;
   }
 
-  // 1) Build the unified row list by walking every file in order.
-  const lineMap = new Map<string, LineDef>();
-  let orderCounter = 0;
+  const wb = XLSX.utils.book_new();
+  const usedNames = new Set<string>();
 
-  successful.forEach((r) => {
-    // Index notes by parent P&L line id (file-scoped)
-    const notesByParent = new Map<string, NoteRow[]>();
-    r.notes.forEach((n) => {
-      const arr = notesByParent.get(n.parentLineItemId) ?? [];
-      arr.push(n);
-      notesByParent.set(n.parentLineItemId, arr);
-    });
-
-    r.pnl.forEach((p: PnLRow) => {
-      const pKey = normalizeKey(p.lineItem);
-      if (!pKey) return;
-      if (!lineMap.has(pKey)) {
-        lineMap.set(pKey, {
-          key: pKey,
-          label: p.lineItem,
-          kind: "pnl",
-          subtotal: isSubtotal(p.lineItem),
-          order: orderCounter++,
-        });
-      }
-
-      if (!isSubtotal(p.lineItem)) {
-        const childNotes = notesByParent.get(p.id) ?? [];
-        childNotes.forEach((n) => {
-          const nKey = `${pKey}::${normalizeKey(n.component)}`;
-          if (!lineMap.has(nKey)) {
-            lineMap.set(nKey, {
-              key: nKey,
-              label: `    ${n.component}`,
-              kind: "note",
-              parentKey: pKey,
-              subtotal: false,
-              order: orderCounter++,
-            });
-          }
-        });
-      }
-    });
+  successful.forEach((r, idx) => {
+    const ws = buildEntitySheet(r);
+    const name = uniqueSheetName(r.company || r.fileName || `Entity ${idx + 1}`, usedNames);
+    XLSX.utils.book_append_sheet(wb, ws, name);
   });
 
-  const lines = Array.from(lineMap.values()).sort((a, b) => a.order - b.order);
+  XLSX.writeFile(wb, `pnl_extract_${new Date().toISOString().slice(0, 10)}.xlsx`);
+}
 
-  // 2) Build per-file value lookup: key -> { cy, py }
-  const fileValues: Array<Map<string, { cy: number | null; py: number | null }>> = successful.map((r) => {
-    const m = new Map<string, { cy: number | null; py: number | null }>();
-    const notesByParent = new Map<string, NoteRow[]>();
-    r.notes.forEach((n) => {
-      const arr = notesByParent.get(n.parentLineItemId) ?? [];
-      arr.push(n);
-      notesByParent.set(n.parentLineItemId, arr);
-    });
-    r.pnl.forEach((p) => {
-      const pKey = normalizeKey(p.lineItem);
-      if (!pKey) return;
-      m.set(pKey, { cy: p.currentYear, py: p.priorYear });
+// Excel sheet names: max 31 chars, cannot contain : \ / ? * [ ]
+function sanitizeSheetName(name: string) {
+  return (name || "Sheet")
+    .replace(/[:\\/?*[\]]/g, " ")
+    .trim()
+    .slice(0, 31) || "Sheet";
+}
+
+function uniqueSheetName(raw: string, used: Set<string>) {
+  const base = sanitizeSheetName(raw);
+  if (!used.has(base)) {
+    used.add(base);
+    return base;
+  }
+  let i = 2;
+  while (true) {
+    const suffix = ` (${i})`;
+    const candidate = sanitizeSheetName(base.slice(0, 31 - suffix.length) + suffix);
+    if (!used.has(candidate)) {
+      used.add(candidate);
+      return candidate;
+    }
+    i++;
+  }
+}
+
+/**
+ * Build a single per-entity worksheet:
+ *   Header rows: company, statement title, period + currency + source.
+ *   Then a P&L table with notes nested (indented) under their parent line.
+ */
+function buildEntitySheet(r: ExtractionResult) {
+  const rows: Row[] = [];
+  const styleMap: Record<number, "company" | "title" | "meta" | "header" | "subtotal" | "note" | "line" | "blank"> = {};
+
+  rows.push([r.company || r.fileName, "", "", "", ""]);
+  styleMap[rows.length - 1] = "company";
+
+  rows.push([r.statementTitle || "Statement of Profit or Loss", "", "", "", ""]);
+  styleMap[rows.length - 1] = "title";
+
+  rows.push([
+    `Period: ${r.period || "—"}`,
+    "",
+    `Currency: ${r.currency || "—"}`,
+    "",
+    `Source: ${r.fileName}`,
+  ]);
+  styleMap[rows.length - 1] = "meta";
+
+  rows.push(["", "", "", "", ""]);
+  styleMap[rows.length - 1] = "blank";
+
+  rows.push(["Line Item", "Note", "Current Year", "Prior Year", "Page"]);
+  styleMap[rows.length - 1] = "header";
+
+  // Group notes by parent P&L line id
+  const notesByParent = new Map<string, NoteRow[]>();
+  r.notes.forEach((n) => {
+    const arr = notesByParent.get(n.parentLineItemId) ?? [];
+    arr.push(n);
+    notesByParent.set(n.parentLineItemId, arr);
+  });
+
+  r.pnl.forEach((p: PnLRow) => {
+    const subtotal = isSubtotal(p.lineItem);
+    rows.push([
+      p.lineItem,
+      p.noteRef ?? "",
+      p.currentYear,
+      p.priorYear,
+      p.page ?? "",
+    ]);
+    styleMap[rows.length - 1] = subtotal ? "subtotal" : "line";
+
+    if (!subtotal) {
       const childNotes = notesByParent.get(p.id) ?? [];
       childNotes.forEach((n) => {
-        const nKey = `${pKey}::${normalizeKey(n.component)}`;
-        m.set(nKey, { cy: n.currentYear, py: n.priorYear });
+        rows.push([
+          `    ${n.component}${n.noteTitle ? `  (${n.noteTitle})` : ""}`,
+          "",
+          n.currentYear,
+          n.priorYear,
+          n.page ?? "",
+        ]);
+        styleMap[rows.length - 1] = "note";
       });
-    });
-    return m;
-  });
-
-  // 3) Compose the sheet.
-  // Column layout: col 0 = Line Item label.
-  // Then for each file: [CY, PY, blank-spacer]. Spacer omitted after last file.
-  const COL_LABEL = 0;
-  const colsPerFile = 3; // CY, PY, blank
-  const totalCols = 1 + successful.length * colsPerFile - 1; // drop trailing spacer
-
-  // Row 1: Entity name + period, merged across that file's 2 value columns.
-  // Row 2: Currency.
-  // Row 3: "Current Year" / "Prior Year" sub-headers.
-  // Row 4+: data rows.
-  const rows: Row[] = [];
-
-  const entityRow: Row = new Array(totalCols).fill("");
-  const currencyRow: Row = new Array(totalCols).fill("");
-  const subHeaderRow: Row = new Array(totalCols).fill("");
-  subHeaderRow[COL_LABEL] = "Line Item";
-
-  successful.forEach((r, i) => {
-    const cyCol = 1 + i * colsPerFile;
-    const pyCol = cyCol + 1;
-    entityRow[cyCol] = `${r.company || r.fileName}${r.period ? ` — ${r.period}` : ""}`;
-    currencyRow[cyCol] = r.currency ? `Currency: ${r.currency}` : "";
-    subHeaderRow[cyCol] = "Current Year";
-    subHeaderRow[pyCol] = "Prior Year";
-  });
-
-  rows.push(entityRow);
-  rows.push(currencyRow);
-  rows.push(subHeaderRow);
-
-  const dataStartRow = rows.length;
-
-  lines.forEach((ln) => {
-    const row: Row = new Array(totalCols).fill("");
-    row[COL_LABEL] = ln.label;
-    successful.forEach((_r, i) => {
-      const cyCol = 1 + i * colsPerFile;
-      const pyCol = cyCol + 1;
-      const v = fileValues[i].get(ln.key);
-      row[cyCol] = v?.cy ?? "";
-      row[pyCol] = v?.py ?? "";
-    });
-    rows.push(row);
+    }
   });
 
   const ws = XLSX.utils.aoa_to_sheet(rows);
 
-  // Column widths
-  const cols: { wch: number }[] = [{ wch: 50 }];
-  for (let i = 0; i < successful.length; i++) {
-    cols.push({ wch: 16 }); // CY
-    cols.push({ wch: 16 }); // PY
-    if (i < successful.length - 1) cols.push({ wch: 3 }); // spacer
-  }
-  ws["!cols"] = cols;
+  ws["!cols"] = [
+    { wch: 60 },
+    { wch: 8 },
+    { wch: 18 },
+    { wch: 18 },
+    { wch: 8 },
+  ];
 
-  // Merges: entity name across CY+PY for each file.
+  // Merge company / title across all 5 columns
   ws["!merges"] = ws["!merges"] || [];
-  successful.forEach((_r, i) => {
-    const cyCol = 1 + i * colsPerFile;
-    const pyCol = cyCol + 1;
-    ws["!merges"]!.push({ s: { r: 0, c: cyCol }, e: { r: 0, c: pyCol } });
-    ws["!merges"]!.push({ s: { r: 1, c: cyCol }, e: { r: 1, c: pyCol } });
+  rows.forEach((_, rIdx) => {
+    const kind = styleMap[rIdx];
+    if (kind === "company" || kind === "title") {
+      ws["!merges"]!.push({ s: { r: rIdx, c: 0 }, e: { r: rIdx, c: 4 } });
+    }
   });
 
-  // Freeze top 3 header rows + label column.
-  ws["!freeze"] = { xSplit: 1, ySplit: 3 } as never;
-  (ws as { [k: string]: unknown })["!views"] = [{ state: "frozen", xSplit: 1, ySplit: 3 }];
+  // Freeze header rows + label column
+  (ws as { [k: string]: unknown })["!views"] = [
+    { state: "frozen", xSplit: 1, ySplit: 5 },
+  ];
 
-  // Styling
   const numFmt = '#,##0;(#,##0);"-"';
-  const lastRow = rows.length - 1;
-
-  for (let r = 0; r <= lastRow; r++) {
-    for (let c = 0; c < totalCols; c++) {
-      const addr = XLSX.utils.encode_cell({ r, c });
+  rows.forEach((_, rIdx) => {
+    const kind = styleMap[rIdx];
+    for (let c = 0; c < 5; c++) {
+      const addr = XLSX.utils.encode_cell({ r: rIdx, c });
       const cell = ws[addr];
       if (!cell) continue;
-
-      // Spacer columns: skip styling
-      const isSpacer =
-        c > 0 && (c - 1) % colsPerFile === 2 && c !== totalCols; // every 3rd col after the label
-      if (isSpacer) continue;
-
-      // Entity header row
-      if (r === 0 && c >= 1) {
+      if ((c === 2 || c === 3) && typeof cell.v === "number") {
+        cell.z = numFmt;
+      }
+      if (kind === "company") {
         cell.s = {
-          font: { bold: true, sz: 12, color: { rgb: "FFFFFF" } },
+          font: { bold: true, sz: 14, color: { rgb: "FFFFFF" } },
           fill: { fgColor: { rgb: "1F3A5F" } },
-          alignment: { horizontal: "center" },
+          alignment: { horizontal: "left" },
         };
-        continue;
-      }
-      // Currency row
-      if (r === 1 && c >= 1) {
-        cell.s = {
-          font: { italic: true, sz: 10, color: { rgb: "555555" } },
-          alignment: { horizontal: "center" },
-        };
-        continue;
-      }
-      // Sub-header row (CY/PY + Line Item)
-      if (r === 2) {
+      } else if (kind === "title") {
+        cell.s = { font: { bold: true, sz: 12, italic: true } };
+      } else if (kind === "meta") {
+        cell.s = { font: { sz: 10, color: { rgb: "555555" } } };
+      } else if (kind === "header") {
         cell.s = {
           font: { bold: true, color: { rgb: "FFFFFF" } },
           fill: { fgColor: { rgb: "4A6FA5" } },
-          alignment: { horizontal: c === 0 ? "left" : "right" },
+          alignment: { horizontal: c >= 2 ? "right" : "left" },
         };
-        continue;
-      }
-
-      // Data rows
-      const lineIdx = r - dataStartRow;
-      const ln = lines[lineIdx];
-      if (!ln) continue;
-
-      if (typeof cell.v === "number") cell.z = numFmt;
-
-      if (ln.subtotal) {
+      } else if (kind === "subtotal") {
         cell.s = {
           font: { bold: true },
           fill: { fgColor: { rgb: "EAF0F8" } },
@@ -256,24 +220,20 @@ export function exportToXlsx(results: ExtractionResult[]) {
             top: { style: "thin", color: { rgb: "888888" } },
             bottom: { style: "thin", color: { rgb: "888888" } },
           },
-          alignment: { horizontal: c === 0 ? "left" : "right" },
+          alignment: { horizontal: c >= 2 ? "right" : "left" },
         };
-      } else if (ln.kind === "note") {
+      } else if (kind === "note") {
         cell.s = {
           font: { italic: true, sz: 10, color: { rgb: "333333" } },
-          alignment: { horizontal: c === 0 ? "left" : "right", indent: c === 0 ? 1 : 0 },
+          alignment: { horizontal: c >= 2 ? "right" : "left", indent: c === 0 ? 1 : 0 },
         };
-      } else {
-        cell.s = {
-          alignment: { horizontal: c === 0 ? "left" : "right" },
-        };
+      } else if (kind === "line") {
+        cell.s = { alignment: { horizontal: c >= 2 ? "right" : "left" } };
       }
     }
-  }
+  });
 
-  const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, ws, "P&L Comparison");
-  XLSX.writeFile(wb, `pnl_comparison_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  return ws;
 }
 
 // Legacy per-file stacked layout, kept in case it is referenced elsewhere.
