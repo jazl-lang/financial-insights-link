@@ -19,17 +19,29 @@ const App = () => {
     return <LoginPage onLogin={() => setIsAuthenticated(true)} />;
   }
 
+  const handleLogout = () => {
+    localStorage.removeItem("pnl_auth");
+    setIsAuthenticated(false);
+  };
+
   return (
     <QueryClientProvider client={queryClient}>
       <TooltipProvider>
         <Toaster />
         <Sonner />
         <BrowserRouter>
-          <Routes>
-            <Route path="/" element={<Index />} />
-            {/* ADD ALL CUSTOM ROUTES ABOVE THE CATCH-ALL "*" ROUTE */}
-            <Route path="*" element={<NotFound />} />
-          </Routes>
+          <div className="relative">
+            <button
+              onClick={handleLogout}
+              className="fixed top-4 right-4 z-50 bg-white border border-gray-200 text-gray-600 hover:text-red-500 hover:border-red-300 text-sm px-4 py-2 rounded-lg shadow-sm transition-colors"
+            >
+              Sign Out
+            </button>
+            <Routes>
+              <Route path="/" element={<Index />} />
+              <Route path="*" element={<NotFound />} />
+            </Routes>
+          </div>
         </BrowserRouter>
       </TooltipProvider>
     </QueryClientProvider>
