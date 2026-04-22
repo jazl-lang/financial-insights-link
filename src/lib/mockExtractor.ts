@@ -1,6 +1,8 @@
 // Mock extraction pipeline. Designed so the shape matches what a real backend
-// (PDF parse + OCR + note linking) would return. Swap `extractFromPdf` with a
-// real API call later without touching UI code.
+// (PDF parse + OCR + note linking) would return. The real `extractFromPdf` now
+// calls a Supabase edge function; the mock helpers below remain for the demo
+// button.
+import { supabase } from "@/integrations/supabase/client";
 
 export type Confidence = "high" | "medium" | "low";
 
@@ -185,4 +187,109 @@ export function formatMoney(v: number | null, currency: string) {
   const sign = v < 0 ? "(" : "";
   const close = v < 0 ? ")" : "";
   return `${sign}${currency} ${Math.abs(v).toLocaleString()}${close}`;
+}
+
+// --- Real extraction via edge function -------------------------------------
+
+async function fileToBase64(file: File): Promise<string> {
+  const buf = await file.arrayBuffer();
+  const u8 = new Uint8Array(buf);
+  let binary = "";
+  const CHUNK = 0x8000;
+  for (let i = 0; i < u8.length; i += CHUNK) {
+    binary += String.fromCharCode(...u8.subarray(i, i + CHUNK));
+  }
+  return btoa(binary);
+}
+
+interface RawExtraction {
+  company: string;
+  period: string;
+  currency: string;
+  statementTitle: string;
+  pnl: Array<{ lineItem: string; noteRef: string; currentYear: number; priorYear: number; page: number }>;
+  notes: Array<{
+    parentLineItem: string;
+    noteTitle: string;
+    component: string;
+    currentYear: number;
+    priorYear: number;
+    page: number;
+    confidence: Confidence;
+    matchMethod: "explicit" | "title" | "semantic";
+    flagged: boolean;
+  }>;
+}
+
+function shapeResult(fileName: string, raw: RawExtraction): Omit<ExtractionResult, "fileId" | "status" | "progress"> {
+  const pnl: PnLRow[] = raw.pnl.map((p, i) => ({
+    id: `pnl-${fileName}-${i}`,
+    lineItem: p.lineItem,
+    noteRef: p.noteRef && p.noteRef.trim() ? p.noteRef.trim() : null,
+    currentYear: p.currentYear,
+    priorYear: p.priorYear,
+    page: p.page,
+  }));
+  // Map note rows to parent P&L rows by exact, then case-insensitive, then loose containment match
+  const findParent = (label: string): string => {
+    const exact = pnl.find((p) => p.lineItem === label);
+    if (exact) return exact.id;
+    const ci = pnl.find((p) => p.lineItem.toLowerCase() === label.toLowerCase());
+    if (ci) return ci.id;
+    const loose = pnl.find(
+      (p) => p.lineItem.toLowerCase().includes(label.toLowerCase()) || label.toLowerCase().includes(p.lineItem.toLowerCase()),
+    );
+    return loose?.id ?? (pnl[0]?.id ?? "");
+  };
+  const notes: NoteRow[] = raw.notes.map((n, i) => ({
+    id: `note-${fileName}-${i}`,
+    parentLineItemId: findParent(n.parentLineItem),
+    noteTitle: n.noteTitle,
+    component: n.component,
+    currentYear: n.currentYear,
+    priorYear: n.priorYear,
+    page: n.page,
+    confidence: n.confidence,
+    matchMethod: n.matchMethod,
+    flagged: n.flagged,
+  }));
+  return {
+    fileName,
+    company: raw.company,
+    period: raw.period,
+    currency: raw.currency || "—",
+    statementTitle: raw.statementTitle,
+    pnl,
+    notes,
+  };
+}
+
+export async function extractFromPdfReal(
+  file: File,
+  onProgress: (progress: number) => void,
+): Promise<Omit<ExtractionResult, "fileId" | "status">> {
+  onProgress(8);
+  const base64 = await fileToBase64(file);
+  onProgress(25);
+
+  // Simulate steady progress while edge function runs (real progress isn't streamed)
+  let p = 25;
+  const tick = setInterval(() => {
+    p = Math.min(p + 4, 90);
+    onProgress(p);
+  }, 1500);
+
+  try {
+    const { data, error } = await supabase.functions.invoke("extract-pnl", {
+      body: { fileName: file.name, base64 },
+    });
+    clearInterval(tick);
+    if (error) throw error;
+    if (data?.error) throw new Error(data.error);
+    onProgress(100);
+    return { ...shapeResult(file.name, data as RawExtraction), progress: 100 };
+  } catch (e) {
+    clearInterval(tick);
+    throw e;
+  }
 }
