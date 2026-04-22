@@ -109,7 +109,7 @@ const Index = () => {
               Extract Profit &amp; Loss statements and their notes — automatically.
             </h2>
             <p className="text-muted-foreground">
-              Upload up to 20 annual reports. We detect the income statement, link each line to its
+              Upload up to 30 annual reports. We detect the income statement, link each line to its
               explanatory note breakdown, and export everything into one clean Excel workbook.
             </p>
           </section>
