@@ -7,7 +7,7 @@
 //   4. Send the extracted text to Gemini with a strict tool schema and return
 //      structured ExtractionResult JSON.
 
-import { extractText, getDocumentProxy, renderPageAsImage } from "https://esm.sh/unpdf@0.12.1";
+import { extractText, getDocumentProxy } from "https://esm.sh/unpdf@0.12.1";
 
 const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
@@ -84,44 +84,35 @@ async function uint8ToBase64(u8: Uint8Array): Promise<string> {
   return btoa(binary);
 }
 
-async function ocrPagesWithVision(pdfBytes: Uint8Array, totalPages: number, apiKey: string): Promise<string> {
-  // OCR up to first ~25 pages to keep latency reasonable
-  const maxPages = Math.min(totalPages, 25);
-  const pdf = await getDocumentProxy(pdfBytes);
-  const pageTexts: string[] = [];
-
-  for (let p = 1; p <= maxPages; p++) {
-    try {
-      const png = await renderPageAsImage(pdf, p, { canvas: () => import("https://esm.sh/@napi-rs/canvas@0.1.53") as any, scale: 1.5 });
-      const b64 = await uint8ToBase64(new Uint8Array(png));
-      const resp = await fetch(AI_URL, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-        body: JSON.stringify({
-          model: VISION_MODEL,
-          messages: [
+// OCR fallback: pass the entire PDF directly to Gemini as a file attachment.
+// Gemini natively reads PDFs (including scanned ones via its vision pipeline),
+// avoiding the need to render pages ourselves in the edge runtime.
+async function ocrWithGeminiPdf(pdfB64: string, apiKey: string): Promise<string> {
+  const resp = await fetch(AI_URL, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: VISION_MODEL,
+      messages: [
+        {
+          role: "user",
+          content: [
             {
-              role: "user",
-              content: [
-                { type: "text", text: `Transcribe ALL text on this annual-report page exactly as printed, preserving table structure with pipes (|) between columns. Page ${p}.` },
-                { type: "image_url", image_url: { url: `data:image/png;base64,${b64}` } },
-              ],
+              type: "text",
+              text: "This is a scanned annual report. Transcribe ALL text on every page in order. Preserve table structure using pipes (|) between columns. At the start of each page output a marker line exactly: '===== PAGE N =====' where N is the page number. Output only the transcription, no commentary.",
             },
+            { type: "image_url", image_url: { url: `data:application/pdf;base64,${pdfB64}` } },
           ],
-        }),
-      });
-      if (!resp.ok) {
-        console.warn(`OCR page ${p} failed: ${resp.status}`);
-        continue;
-      }
-      const data = await resp.json();
-      const text = data.choices?.[0]?.message?.content ?? "";
-      pageTexts.push(`\n\n===== PAGE ${p} =====\n${text}`);
-    } catch (e) {
-      console.warn(`OCR error page ${p}:`, e);
-    }
+        },
+      ],
+    }),
+  });
+  if (!resp.ok) {
+    const t = await resp.text();
+    throw new Error(`Vision OCR failed ${resp.status}: ${t}`);
   }
-  return pageTexts.join("\n");
+  const data = await resp.json();
+  return data.choices?.[0]?.message?.content ?? "";
 }
 
 async function extractTextFromPdf(pdfBytes: Uint8Array): Promise<{ text: string; pages: string[]; weak: boolean; totalPages: number }> {
@@ -196,7 +187,7 @@ Deno.serve(async (req) => {
     if (weak) {
       console.log(`Weak text (${text.length} chars / ${totalPages} pages) — falling back to OCR`);
       try {
-        const ocrText = await ocrPagesWithVision(pdfBytes, totalPages, apiKey);
+        const ocrText = await ocrWithGeminiPdf(base64, apiKey);
         if (ocrText && ocrText.length > text.length) {
           text = ocrText;
           usedOcr = true;
