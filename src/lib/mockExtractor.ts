@@ -33,6 +33,7 @@ export interface ExtractionResult {
   fileName: string;
   status: "queued" | "processing" | "success" | "error";
   progress: number;
+  step?: string;
   error?: string;
   company: string;
   period: string;
@@ -266,17 +267,17 @@ function shapeResult(fileName: string, raw: RawExtraction): Omit<ExtractionResul
 
 export async function extractFromPdfReal(
   file: File,
-  onProgress: (progress: number) => void,
+  onProgress: (progress: number, step?: string) => void,
 ): Promise<Omit<ExtractionResult, "fileId" | "status">> {
-  onProgress(8);
+  onProgress(5, "Reading file");
   const base64 = await fileToBase64(file);
-  onProgress(25);
+  onProgress(25, "Uploading");
 
   // Simulate steady progress while edge function runs (real progress isn't streamed)
   let p = 25;
   const tick = setInterval(() => {
-    p = Math.min(p + 4, 90);
-    onProgress(p);
+    p = Math.min(p + 4, 88);
+    onProgress(p, "Extracting financials");
   }, 1500);
 
   try {
@@ -284,9 +285,13 @@ export async function extractFromPdfReal(
       body: { fileName: file.name, base64 },
     });
     clearInterval(tick);
-    if (error) throw error;
+    if (error) {
+      // Surface the actual message from the function body if available
+      const body = await (error as { context?: Response }).context?.json?.().catch(() => null);
+      throw new Error(body?.error ?? error.message ?? "Edge function error");
+    }
     if (data?.error) throw new Error(data.error);
-    onProgress(100);
+    onProgress(100, "Done");
     return { ...shapeResult(file.name, data as RawExtraction), progress: 100 };
   } catch (e) {
     clearInterval(tick);

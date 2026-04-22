@@ -45,7 +45,7 @@ const Index = () => {
       const id = queued[i].fileId;
       updateItem(id, { status: "processing", progress: 5 });
       try {
-        const result = await extractFromPdfReal(files[i], (p) => updateItem(id, { progress: p }));
+        const result = await extractFromPdfReal(files[i], (p, step) => updateItem(id, { progress: p, step }));
         updateItem(id, { ...result, status: "success", fileId: id });
       } catch (e) {
         updateItem(id, { status: "error", error: e instanceof Error ? e.message : "Unknown error" });
