@@ -6,7 +6,7 @@ import { UploadZone } from "@/components/UploadZone";
 import { FileProcessingList } from "@/components/FileProcessingList";
 import { ResultsView } from "@/components/ResultsView";
 import {
-  extractFromPdf,
+  extractFromPdfReal,
   getDemoResults,
   type ExtractionResult,
 } from "@/lib/mockExtractor";
@@ -45,8 +45,8 @@ const Index = () => {
       const id = queued[i].fileId;
       updateItem(id, { status: "processing", progress: 5 });
       try {
-        const result = await extractFromPdf(files[i], items.length + i, (p) => updateItem(id, { progress: p }));
-        updateItem(id, { ...result, fileId: id });
+        const result = await extractFromPdfReal(files[i], (p) => updateItem(id, { progress: p }));
+        updateItem(id, { ...result, status: "success", fileId: id });
       } catch (e) {
         updateItem(id, { status: "error", error: e instanceof Error ? e.message : "Unknown error" });
       }
