@@ -41,11 +41,11 @@ export interface ExtractionResult {
 }
 
 const SAMPLE_COMPANIES = [
-  { name: "Acme Industries PLC", period: "FY 2024", currency: "USD" },
-  { name: "Northwind Holdings Ltd", period: "FY 2024", currency: "GBP" },
-  { name: "Globex Manufacturing SA", period: "FY 2023", currency: "EUR" },
-  { name: "Initech Technologies Inc", period: "FY 2024", currency: "USD" },
-  { name: "Umbrella Group Bhd", period: "FY 2023", currency: "MYR" },
+  { name: "Acme Industries BSC", period: "FY 2024", currency: "BHD" },
+  { name: "Northwind Holdings WLL", period: "FY 2024", currency: "BHD" },
+  { name: "Globex Manufacturing BSC", period: "FY 2023", currency: "BHD" },
+  { name: "Initech Technologies WLL", period: "FY 2024", currency: "BHD" },
+  { name: "Umbrella Group BSC", period: "FY 2023", currency: "BHD" },
 ];
 
 function rand(min: number, max: number) {
