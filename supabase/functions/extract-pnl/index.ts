@@ -1,8 +1,7 @@
-// Real PDF extraction with AI-native PDF reading (handles scans via Claude vision).
+// Real PDF extraction using Google Gemini API directly.
 // Pipeline:
 //   1. Receive base64 PDF from client.
-//   2. Send the PDF directly to Claude as a document attachment together with a
-//      strict tool schema. Claude natively reads both text-based and scanned PDFs.
+//   2. Send the PDF directly to Gemini as inline base64 data.
 //   3. Return the structured ExtractionResult JSON.
 
 const corsHeaders = {
@@ -11,56 +10,54 @@ const corsHeaders = {
     "authorization, x-client-info, apikey, content-type, x-supabase-client-platform, x-supabase-client-platform-version, x-supabase-client-runtime, x-supabase-client-runtime-version",
 };
 
-const AI_URL = "https://api.anthropic.com/v1/messages";
-const EXTRACT_MODEL = "claude-opus-4-6";
+const EXTRACT_MODEL = "gemini-2.5-pro";
 
 const EXTRACT_SCHEMA = {
-  type: "object",
+  type: "OBJECT",
   properties: {
-    company: { type: "string", description: "Company / reporting entity name" },
-    period: { type: "string", description: "Reporting period e.g. 'FY 2024' or 'Year ended 31 Dec 2024'" },
-    currency: { type: "string", description: "Reporting currency code, e.g. BHD, USD, EUR. Use empty string if unknown." },
-    statementTitle: { type: "string", description: "Title of the P&L statement as printed in the report" },
+    company: { type: "STRING", description: "Company / reporting entity name" },
+    period: { type: "STRING", description: "Reporting period e.g. 'FY 2024' or 'Year ended 31 Dec 2024'" },
+    currency: { type: "STRING", description: "Reporting currency code, e.g. BHD, USD, EUR. Use empty string if unknown." },
+    statementTitle: { type: "STRING", description: "Title of the P&L statement as printed in the report" },
     pnl: {
-      type: "array",
+      type: "ARRAY",
       description: "P&L / income statement rows in document order",
       items: {
-        type: "object",
+        type: "OBJECT",
         properties: {
-          lineItem: { type: "string" },
-          noteRef: { type: "string", description: "Note number printed next to this row, or empty string" },
-          currentYear: { type: "number", description: "Use the latest period's value. Negative for expenses if shown that way." },
-          priorYear: { type: "number" },
-          page: { type: "integer", description: "1-based page number where this row appears" },
+          lineItem: { type: "STRING" },
+          noteRef: { type: "STRING", description: "Note number printed next to this row, or empty string" },
+          currentYear: { type: "NUMBER", description: "Use the latest period's value. Negative for expenses if shown that way." },
+          priorYear: { type: "NUMBER" },
+          page: { type: "INTEGER", description: "1-based page number where this row appears" },
         },
         required: ["lineItem", "noteRef", "currentYear", "priorYear", "page"],
-        additionalProperties: false,
       },
     },
     notes: {
-      type: "array",
+      type: "ARRAY",
       description: "Note breakdown rows that explain P&L line items",
       items: {
-        type: "object",
+        type: "OBJECT",
         properties: {
-          parentLineItem: { type: "string", description: "Exact text of the P&L line this note explains" },
-          noteTitle: { type: "string", description: "Heading of the note section" },
-          component: { type: "string", description: "Sub-line / component name within the note" },
-          currentYear: { type: "number" },
-          priorYear: { type: "number" },
-          page: { type: "integer" },
-          confidence: { type: "string", enum: ["high", "medium", "low"] },
-          matchMethod: { type: "string", enum: ["explicit", "title", "semantic"] },
-          flagged: { type: "boolean" },
+          parentLineItem: { type: "STRING", description: "Exact text of the P&L line this note explains" },
+          noteTitle: { type: "STRING", description: "Heading of the note section" },
+          component: { type: "STRING", description: "Sub-line / component name within the note" },
+          currentYear: { type: "NUMBER" },
+          priorYear: { type: "NUMBER" },
+          page: { type: "INTEGER" },
+          confidence: { type: "STRING", enum: ["high", "medium", "low"] },
+          matchMethod: { type: "STRING", enum: ["explicit", "title", "semantic"] },
+          flagged: { type: "BOOLEAN" },
         },
         required: ["parentLineItem", "noteTitle", "component", "currentYear", "priorYear", "page", "confidence", "matchMethod", "flagged"],
-        additionalProperties: false,
       },
     },
   },
   required: ["company", "period", "currency", "statementTitle", "pnl", "notes"],
-  additionalProperties: false,
 };
+
+const SYSTEM_PROMPT = "You are a financial-document extraction engine. You will be given a PDF of an annual report / audited financial statements. Your job: (1) locate the consolidated Profit & Loss / Income Statement (also called 'Statement of Profit or Loss', 'Statement of Comprehensive Income', or 'Income Statement'); (2) extract EVERY row in order, including subtotals like 'Gross profit', 'Operating profit', 'Profit for the year'; (3) capture both the latest period and the comparative prior period as numbers (parentheses = negative); (4) record the page number each row appears on; (5) then locate the explanatory notes that break down each P&L line and return their components. Match notes to P&L lines: prefer the explicit numeric note ref printed next to the P&L row; otherwise match by note title; otherwise infer semantically and flag with lower confidence. NEVER return empty arrays unless the document truly has no income statement — if you can see revenue/expense rows, you MUST return them.\n\nLANGUAGE / TRANSLATION RULES:\n- If the document is in English, copy line-item text, note titles, components, company name, period, and statement title VERBATIM.\n- If the document is in Arabic (or any non-English language), TRANSLATE all textual fields into clear, standard English financial terminology (e.g. 'الإيرادات' → 'Revenue', 'تكلفة المبيعات' → 'Cost of sales', 'إجمالي الربح' → 'Gross profit', 'مصاريف عمومية وإدارية' → 'General and administrative expenses', 'صافي الربح للسنة' → 'Net profit for the year').\n- Translate: company name (transliterate proper names if no English form is printed), period, statementTitle, lineItem, noteTitle, parentLineItem, component.\n- For bilingual documents that already show an English version next to the Arabic, USE the printed English text as-is.\n- NEVER translate or alter numeric values — keep digits, signs, and magnitudes exactly as printed (convert Arabic-Indic digits ٠-٩ to Western 0-9).\n- Currency codes must be returned in standard ISO form in English (e.g. BHD, SAR, AED, USD).\n- All output strings in the JSON MUST be in English regardless of the source language.";
 
 function bytesFromBase64(b64: string): Uint8Array {
   const binary = atob(b64);
@@ -69,76 +66,80 @@ function bytesFromBase64(b64: string): Uint8Array {
   return out;
 }
 
-// Send the PDF directly to Claude and ask it to return structured P&L data
-// via a tool call. Claude reads PDFs natively (text + scans).
-async function extractFromPdfWithClaude(pdfB64: string, apiKey: string) {
+async function extractFromPdfWithGemini(pdfB64: string, apiKey: string) {
+  const url = `https://generativelanguage.googleapis.com/v1beta/models/${EXTRACT_MODEL}:generateContent?key=${apiKey}`;
+
   const body = {
-    model: EXTRACT_MODEL,
-    max_tokens: 8192,
-    system:
-      "You are a financial-document extraction engine. You will be given a PDF of an annual report / audited financial statements. Your job: (1) locate the consolidated Profit & Loss / Income Statement (also called 'Statement of Profit or Loss', 'Statement of Comprehensive Income', or 'Income Statement'); (2) extract EVERY row in order, including subtotals like 'Gross profit', 'Operating profit', 'Profit for the year'; (3) capture both the latest period and the comparative prior period as numbers (parentheses = negative); (4) record the page number each row appears on; (5) then locate the explanatory notes that break down each P&L line and return their components. Match notes to P&L lines: prefer the explicit numeric note ref printed next to the P&L row; otherwise match by note title; otherwise infer semantically and flag with lower confidence. NEVER return empty arrays unless the document truly has no income statement — if you can see revenue/expense rows, you MUST return them.\n\nLANGUAGE / TRANSLATION RULES:\n- If the document is in English, copy line-item text, note titles, components, company name, period, and statement title VERBATIM.\n- If the document is in Arabic (or any non-English language), TRANSLATE all textual fields into clear, standard English financial terminology (e.g. 'الإيرادات' → 'Revenue', 'تكلفة المبيعات' → 'Cost of sales', 'إجمالي الربح' → 'Gross profit', 'مصاريف عمومية وإدارية' → 'General and administrative expenses', 'صافي الربح للسنة' → 'Net profit for the year').\n- Translate: company name (transliterate proper names if no English form is printed), period, statementTitle, lineItem, noteTitle, parentLineItem, component.\n- For bilingual documents that already show an English version next to the Arabic, USE the printed English text as-is.\n- NEVER translate or alter numeric values — keep digits, signs, and magnitudes exactly as printed (convert Arabic-Indic digits ٠-٩ to Western 0-9).\n- Currency codes must be returned in standard ISO form in English (e.g. BHD, SAR, AED, USD).\n- All output strings in the JSON MUST be in English regardless of the source language.",
-    messages: [
+    system_instruction: {
+      parts: [{ text: SYSTEM_PROMPT }],
+    },
+    contents: [
       {
         role: "user",
-        content: [
+        parts: [
           {
-            type: "document",
-            source: {
-              type: "base64",
-              media_type: "application/pdf",
+            inline_data: {
+              mime_type: "application/pdf",
               data: pdfB64,
             },
           },
           {
-            type: "text",
-            text: "Extract the P&L statement and supporting notes from this PDF. Return via the return_extraction tool.",
+            text: "Extract the P&L statement and supporting notes from this PDF. Return via the return_extraction function.",
           },
         ],
       },
     ],
     tools: [
       {
-        name: "return_extraction",
-        description: "Return the structured P&L and note extraction.",
-        input_schema: EXTRACT_SCHEMA,
+        function_declarations: [
+          {
+            name: "return_extraction",
+            description: "Return the structured P&L and note extraction.",
+            parameters: EXTRACT_SCHEMA,
+          },
+        ],
       },
     ],
-    tool_choice: { type: "tool", name: "return_extraction" },
+    tool_config: {
+      function_calling_config: {
+        mode: "ANY",
+        allowed_function_names: ["return_extraction"],
+      },
+    },
   };
 
-  const resp = await fetch(AI_URL, {
+  const resp = await fetch(url, {
     method: "POST",
-    headers: {
-      "x-api-key": apiKey,
-      "anthropic-version": "2023-06-01",
-      "Content-Type": "application/json",
-    },
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
 
   if (!resp.ok) {
     const t = await resp.text();
-    console.error("Anthropic API error", resp.status, t);
+    console.error("Gemini API error", resp.status, t);
     if (resp.status === 429) throw new Error("RATE_LIMIT");
-    if (resp.status === 402) throw new Error("PAYMENT_REQUIRED");
+    if (resp.status === 402 || resp.status === 403) throw new Error("PAYMENT_REQUIRED");
     throw new Error("EXTRACTION_FAILED");
   }
 
   const data = await resp.json();
 
-  // Claude returns tool use in content array
-  const toolUse = data.content?.find((block: { type: string }) => block.type === "tool_use");
-  if (!toolUse) throw new Error("AI returned no tool call");
+  // Gemini returns function call in candidates[0].content.parts[0].functionCall
+  const part = data.candidates?.[0]?.content?.parts?.[0];
+  if (!part?.functionCall?.args) {
+    console.error("Unexpected Gemini response:", JSON.stringify(data));
+    throw new Error("AI returned no function call");
+  }
 
-  return toolUse.input;
+  return part.functionCall.args;
 }
 
 Deno.serve(async (req) => {
   if (req.method === "OPTIONS") return new Response(null, { headers: corsHeaders });
 
   try {
-    const apiKey = Deno.env.get("ANTHROPIC_API_KEY");
-    if (!apiKey) throw new Error("ANTHROPIC_API_KEY is not configured");
+    const apiKey = Deno.env.get("GEMINI_API_KEY");
+    if (!apiKey) throw new Error("GEMINI_API_KEY is not configured");
 
     const body = await req.json().catch(() => null);
     if (!body || typeof body !== "object") {
@@ -153,7 +154,6 @@ Deno.serve(async (req) => {
         status: 400, headers: { ...corsHeaders, "Content-Type": "application/json" },
       });
     }
-    // ~15 MB decoded ≈ 20M base64 chars
     if (base64.length > 20_000_000) {
       return new Response(JSON.stringify({ error: "File too large (max ~15 MB)" }), {
         status: 413, headers: { ...corsHeaders, "Content-Type": "application/json" },
@@ -180,7 +180,7 @@ Deno.serve(async (req) => {
       });
     }
 
-    const extracted = await extractFromPdfWithClaude(base64, apiKey);
+    const extracted = await extractFromPdfWithGemini(base64, apiKey);
 
     return new Response(
       JSON.stringify({ ...extracted, fileName }),

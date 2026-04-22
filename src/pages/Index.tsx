@@ -89,7 +89,7 @@ const Index = () => {
               <FileSpreadsheet className="h-5 w-5 text-primary-foreground" />
             </div>
             <div>
-              <h1 className="font-semibold leading-tight">P&amp;L Note Extractor</h1>
+              <h1 className="font-semibold leading-tight">P&L Note Extractor</h1>
               <p className="text-xs text-muted-foreground">Annual report → structured Excel</p>
             </div>
           </div>

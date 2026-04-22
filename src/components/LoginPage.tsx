@@ -29,7 +29,7 @@ export default function LoginPage({ onLogin }: { onLogin: () => void }) {
       return;
     }
     if (username === USERNAME && password === PASSWORD) {
-      localStorage.setItem("pnl_auth", "true");
+      try { localStorage.setItem("pnl_auth", "true"); } catch { /* Safari private mode */ }
       onLogin();
     } else {
       setError("Invalid username or password.");

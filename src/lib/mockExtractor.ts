@@ -242,18 +242,20 @@ function shapeResult(fileName: string, raw: RawExtraction): Omit<ExtractionResul
     );
     return loose?.id ?? (pnl[0]?.id ?? "");
   };
-  const notes: NoteRow[] = raw.notes.map((n, i) => ({
-    id: `note-${fileName}-${i}`,
-    parentLineItemId: findParent(n.parentLineItem),
-    noteTitle: n.noteTitle,
-    component: n.component,
-    currentYear: n.currentYear,
-    priorYear: n.priorYear,
-    page: n.page,
-    confidence: n.confidence,
-    matchMethod: n.matchMethod,
-    flagged: n.flagged,
-  }));
+  const notes: NoteRow[] = raw.notes
+    .map((n, i) => ({
+      id: `note-${fileName}-${i}`,
+      parentLineItemId: findParent(n.parentLineItem),
+      noteTitle: n.noteTitle,
+      component: n.component,
+      currentYear: n.currentYear,
+      priorYear: n.priorYear,
+      page: n.page,
+      confidence: n.confidence,
+      matchMethod: n.matchMethod,
+      flagged: n.flagged,
+    }))
+    .filter((n) => n.parentLineItemId !== "");
   return {
     fileName,
     company: raw.company,
@@ -286,9 +288,15 @@ export async function extractFromPdfReal(
     });
     clearInterval(tick);
     if (error) {
-      // Surface the actual message from the function body if available
-      const body = await (error as { context?: Response }).context?.json?.().catch(() => null);
-      throw new Error(body?.error ?? error.message ?? "Edge function error");
+      let message = error.message || "Edge function error";
+      try {
+        const ctx = (error as Record<string, unknown>).context;
+        if (ctx instanceof Response) {
+          const body = await ctx.clone().json();
+          if (typeof body?.error === "string") message = body.error;
+        }
+      } catch { /* keep original message */ }
+      throw new Error(message);
     }
     if (data?.error) throw new Error(data.error);
     onProgress(100, "Done");
